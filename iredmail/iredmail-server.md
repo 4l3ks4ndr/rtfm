@@ -178,7 +178,7 @@ Afin que cela soit possible, il va falloir ajouter les enregistrements suivants 
 Pour la clé dkim, dans certains cas, il sera nécessaire de la générer sur le serveur mail mais iRedMail encore une fois a automatisé cette partie pour nous.
 Il faudra donc se connecter ici sur SOGo avec le compte postmaster dans lequel 3 mails seront présents, dans le dernier mail se trouvera beaucoup d'informations notamment sur les fichiers de configuration des services et de connexion au serveur.
 
-### Ajout des records au niveau de la zone dns
+### Gestion de la zone dns
 
 Il faudra dans cette partie ajouter dans la zone dns du registrar où se trouve le domaine les enregistrements suivants afin que l'envoi et la réception de mail fonctionne:
 
@@ -189,6 +189,8 @@ Il faudra dans cette partie ajouter dans la zone dns du registrar où se trouve 
 | TXT  | _dmarc              | "v=DMARC1; p=quarantine; rua=mailto:<email postmaster>" |
 | TXT  | @ ou domaine racine | "v=spf1 ip4:<ip du serveur mx -all"                     |
 | MX   | @ ou domaine racine | nom du domaine du serveur mail                          |
+
+Le contenu de la clé dkim publique se trouve dans le mail contenant toutes les informations techniques envoyé par iredmail automatiquement dans postmaster@domain.tld.
 
 Pour ceux qui utilise un reverse proxy comme moi, il faut renseigner l'ip publique du reverse proxy qui se chargera de son côté à la redirection.
 
@@ -243,7 +245,7 @@ Il faudra ensuite redémarrer nginx pour qu'il puisse prendre en compte les nouv
 
 ### Backup
 
-iRedmail sauvegarde automatiquement chaque compte mail grâce à un script situé dans **<u>"/var/vmail/backup/backup_mysql.sh"</u>** et est appelé via une tâche cron qui est exécuté tous les jours à 3:30am dont un mail est également envoyé à postmaster@<domain>.<tld> à chaque fois que celle-ci est exécuté pour avertir.
+iRedmail sauvegarde automatiquement chaque compte mail grâce à un script situé dans **<u>"/var/vmail/backup/backup_mysql.sh"</u>** et est appelé via une tâche cron qui est exécuté tous les jours à 3:30am dont un mail est également envoyé à postmaster@<domain>.<tld> à chaque fois que celle-ci est exécuté.
 
 Les backups des mails sont stockées et compressées ici dans une archive bunzip2: 
 
@@ -251,7 +253,7 @@ Les backups des mails sont stockées et compressées ici dans une archive bunzip
 /var/vmail/backup/mysql/YYYY/MM/dd
 ```
 
-Il est possible de garder aussi la même clé dkim afin de ne pas à devoir systématiquement mettre à jour l'enregistrement dns pour chaque nouvelle restoration.
+Il est possible de garder aussi la même clé dkim afin de ne pas à devoir systématiquement mettre à jour l'enregistrement dns pour chaque nouvelle restauration.
 Par défaut la clé dkim se trouve dans :
 
 ```
@@ -310,23 +312,29 @@ Pour ce faire, il va falloir procéder de la sorte:
 
 ****
 
-Pour l'ajout d'un domaine supplémentaire dans iRedMail, il faudra suivre les mêmes étapes concernant l'ajout d'un certificat ainsi que des dns.
+Pour l'ajout d'un domaine supplémentaire dans iRedMail, il faudra suivre les mêmes étapes suivantes :
 
 Il faut savoir que dans le fichier hosts il n'est pas nécessaire de pointer chaque domaine ajouté, juste un seul suffit pour faire office de reverse.
 
 Etape 1 : Configurer  iredadmin, postfix et amavisd
 
-Se rendre dans la console iredadmin pour ajouter le domaine, se connecter à l'adresse suivante :
+Exécuter les requêtes sql suivantes dans la console mysql :
 
-https://<mydomain>.tld/iredadmin
+```
+INSERT INTO domain (domain, active) VALUES ('example.com', 1);
 
-Puis aller dans "<u>Add</u>" > "<u>Domain</u>" et suivre les étapes.
+INSERT INTO mailbox (username, password, name, domain, storagebasedirectory, storagenode, maildir, quota, active)
+VALUES ('admin@example.com', ENCRYPT('SuperSecret123', CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))),
+        'Admin Example', 'example.com', '/var/vmail', 'vmail1', 'example.com/admin/', 1024, 1);
+```
 
-Une fois fait, il faudra modifier le fichier de configuration /etc/amavis/conf.d/50-user:
+<u>A partir de là il suffira d'ajouter dans les entrées dns du domaine un enregistrement mx pour indiquer que le serveur qui fait authorité est sub.domain.com comme dans l'exemple il faut renseigner mx1.loulax.fr qui fait authorité pour le domaine nouvellement ajouté.</u>
+
+Si toutefois l'on souhaite avoir une clé dkim dédié pour chaque domaine il faudra modifier le fichier de configuration /etc/amavis/conf.d/50-user:
 
 ```
 # Ajouter la ligne suivante
-dkim_key('<domain.tld>', 'dkim', '/var/lib/dkim/domain.tld');
+dkim_key('<domain.tld>', 'dkim', '/var/lib/dkim/domain.tld.pem');
 ```
 
 Puis ajouter la ligne suivante dans la section "<u>dkim_signature_options_bysender_maps</u>":
@@ -343,22 +351,6 @@ Ensuite il faudra générer la clé dkim avec la commande suivante :
 amavisd genrsa /var/lib/dkim/domain.tld.pem
 ```
 
-Ensuite il faudra configurer nginx pour gérer l'autre domaine:
-
-```
-touch /etc/nginx/sites-enabled/<domaine.tld>.conf
-cat /etc/nginx/sites-enabled/00-default.conf | tee -a /etc/nginx/sites-enabled/domain.tld.conf
-cat /etc/nginx/sites-enabled/00-default-ssl.conf | tee -a /etc/nginx/sites-enabled/domain.tld.conf
-cp /etc/nginx/templates/ssl.tmpl /etc/nginx/templates/ssl-domain.tmpl
-```
-
-Enfin éditer le fichier de configuration du domaine fraîchement créé et remplacer les lignes suivantes :
-
-```
-server_name _; => server_name <domain.tld>;
-include /etc/nginx/templates/ssl.tmpl; => include /etc/nginx/templates/ssl-msft.tmpl;
-```
-
 Puis redémarrer les différents services :
 
 ```
@@ -367,11 +359,11 @@ systemctl restart nginx dovecot nginx sogo amavis
 
 Dans le doute, redémarrer complètement le serveur pour s'assurer que tous les services ont bien pris en compte les dernières modifications.
 
-Enfin, il faudra, il faudra se rendre dans la console de gestion de sa zone dns liée au domaine pour permettre d'ajouter les différents enregistrements nécessaires comme cité dans le tableau au dessus.
+Enfin, il faudra se rendre dans la console de gestion de sa zone dns liée au domaine pour permettre d'ajouter les différents enregistrements nécessaires comme cité dans le tableau au dessus.
 
 ## 7) Automatisation
 
-Déploiement d'iRedmail via docker:
+iRedmail lors de la 1ère installation créé un fichier de configuration dans lequel se trouve différentes informations qui peuvent être relues par la suite sans avoir a les redemander 
 
 Créer un répertoire iredmail à la racine du serveur et créer ensuite l'arborescence de dossiers pour iredmail comme suit :
 
@@ -403,7 +395,7 @@ Dockerfile add_domain.py config.env docker-compose.yml domain.txt requirements.t
 
 Contenu du Dockerfile:
 
-```
+```dockerfile
 FROM python:3.11
 
 # Installer les dépendances
@@ -479,8 +471,19 @@ add_domain.py:
 import os
 import mysql.connector
 import time
-import requests
+import argparse
 from dotenv import load_dotenv
+
+# Définition des arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--add-domain", action="store_true", help="Add a domain")
+parser.add_argument("--add-account", action="store_true", help="Add an account")
+parser.add_argument("--domain-name", type=str, help="Domain name")
+parser.add_argument("--user", type=str, help="Email address")
+parser.add_argument("--password", type=str, help="Password for user")
+parser.add_argument("--name", type=str, help="Full name of the user")
+
+args = parser.parse_args()
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -499,47 +502,55 @@ def connect_db():
         database=MYSQL_DB
     )
 
-def get_existing_domains():
-    """ Récupère les domaines déjà présents dans la base de données. """
-    db = connect_db()
-    cursor = db.cursor()
-    cursor.execute("SELECT domain FROM domain;")
-    existing = {row[0] for row in cursor.fetchall()}
-    cursor.close()
-    db.close()
-    return existing
-
 def add_domain(domain):
-    """ Ajoute un nouveau domaine et un admin. """
-    password = "SuperSecret123"  # Générer un mot de passe sécurisé en production
+    """Ajoute un domaine dans la base de données"""
+    db = connect_db()
+    cursor = db.cursor()
+    domain = domain.lower()
+    try:
+        cursor.execute("INSERT INTO domain (domain, active) VALUES (%s, 1)", (domain,))
+        db.commit()
+        print(f"Domaine ajouté : {domain}")
+    except mysql.connector.Error as err:
+        print(f"Erreur MySQL: {err}")
+    finally:
+        cursor.close()
+        db.close()
+
+def add_user(mail, password, name):
+    """Ajoute un utilisateur dans la base de données"""
+    username = mail.split("@")[0]
+    domain = mail.split("@")[-1]
+    mail_dir = f"{domain}/{'/'.join(username[:3])}/{username}/"
+
     db = connect_db()
     cursor = db.cursor()
 
-    cursor.execute("INSERT INTO domain (domain, active) VALUES (%s, 1)", (domain,))
-    cursor.execute("""
-    INSERT INTO mailbox (username, password, name, domain, storagebasedirectory, storagenode, maildir, quota, active)
-    VALUES (%s, ENCRYPT(%s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))),
-            %s, %s, '/var/vmail', 'vmail1', %s, 1024, 1)
-""", (f"admin@{domain}", password, f"Admin {domain}", domain, f"{domain}/admin/"))
-
-    db.commit()
-    cursor.close()
-    db.close()
-    print(f" Domaine ajouté : {domain}")
+    try:
+        cursor.execute(
+            """INSERT INTO mailbox (username, password, name, maildir, quota, domain, created, modified, active)
+               VALUES (%s, ENCRYPT(%s, CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), %s, %s, 1024, %s, NOW(), NOW(), 1)""", (mail, password, name, mail_dir, domain)
+        )
+        db.commit()
+        print(f"Compte ajouté : {mail}")
+    except mysql.connector.Error as err:
+        print(f"Erreur MySQL: {err}")
+    finally:
+        cursor.close()
+        db.close()
 
 def main():
-    while True:
-        existing_domains = get_existing_domains()
+    if args.add_domain:
+        if args.domain_name:
+            add_domain(args.domain_name)
+        else:
+            print("Erreur : Veuillez spécifier --domain-name")
 
-        with open("domains.txt", "r") as file:
-            domains_to_add = {line.strip() for line in file.readlines()}
-
-        new_domains = domains_to_add - existing_domains
-        for domain in new_domains:
-            add_domain(domain)
-
-        print("⏳ Attente de 10 minutes avant la prochaine vérification...")
-        time.sleep(600)  # Vérifie toutes les 10 minutes
+    elif args.add_account:
+        if args.user and args.password and args.name:
+            add_user(args.user, args.password, args.name)
+        else:
+            print("Erreur : Veuillez spécifier --user, --password et --name")
 
 if __name__ == "__main__":
     main()
